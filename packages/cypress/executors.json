@@ -2,8 +2,8 @@
   "$schema": "@angular-devkit/architect/src/builders-schema.json",
   "builders": {
     "cypress": {
-      "implementation": "./src/builders/cypress/cypress.impl",
-      "schema": "./src/builders/cypress/schema.json",
+      "implementation": "./src/executors/cypress/cypress.impl",
+      "schema": "./src/executors/cypress/schema.json",
       "description": "Run Cypress e2e tests"
     }
   }

@@ -8,7 +8,7 @@ import {
 } from '../shared/params';
 import { printHelp } from '../shared/print-help';
 import {
-  TargetConfiguration,
+  ExecutorContext,
   WorkspaceConfiguration,
   Workspaces,
 } from '../shared/workspace';
@@ -86,13 +86,16 @@ function parseRunOpts(
   return res;
 }
 
-export function printRunHelp(opts: RunOptions, schema: Schema) {
+export function printRunHelp(
+  opts: { project: string; target: string },
+  schema: Schema
+) {
   printHelp(`nx run ${opts.project}:${opts.target}`, schema);
 }
 
 export function validateTargetAndConfiguration(
   workspace: WorkspaceConfiguration,
-  opts: RunOptions
+  opts: { project: string; target: string; configuration?: string }
 ) {
   const project = workspace.projects[opts.project];
   if (!project) {
@@ -130,17 +133,16 @@ export function validateTargetAndConfiguration(
   }
 }
 
-export interface TargetContext {
-  root: string;
-  target: TargetConfiguration;
-  workspace: WorkspaceConfiguration;
-  projectName: string;
-}
-
 function isPromise(
   v: Promise<{ success: boolean }> | AsyncIterableIterator<{ success: boolean }>
 ): v is Promise<{ success: boolean }> {
   return typeof (v as any).then === 'function';
+}
+
+async function* promiseToIterator(
+  v: Promise<{ success: boolean }>
+): AsyncIterableIterator<{ success: boolean }> {
+  yield await v;
 }
 
 async function iteratorToProcessStatusCode(
@@ -149,7 +151,97 @@ async function iteratorToProcessStatusCode(
   let r;
   for await (r of i) {
   }
+  if (!r) {
+    throw new Error('NX Executor has not returned or yielded a response.');
+  }
   return r.success ? 0 : 1;
+}
+
+async function runExecutorInternal<T extends { success: boolean }>(
+  {
+    project,
+    target,
+    configuration,
+  }: {
+    project: string;
+    target: string;
+    configuration?: string;
+  },
+  options: { [k: string]: any },
+  root: string,
+  cwd: string,
+  workspace: WorkspaceConfiguration,
+  isVerbose: boolean,
+  printHelp: boolean
+): Promise<AsyncIterableIterator<T>> {
+  validateTargetAndConfiguration(workspace, {
+    project,
+    target,
+    configuration,
+  });
+
+  const ws = new Workspaces(root);
+  const targetConfig = workspace.projects[project].targets[target];
+  const [nodeModule, executor] = targetConfig.executor.split(':');
+  const { schema, implementation } = ws.readExecutor(nodeModule, executor);
+
+  if (printHelp) {
+    printRunHelp({ project, target }, schema);
+    process.exit(0);
+  }
+
+  const combinedOptions = combineOptionsForExecutor(
+    options,
+    configuration,
+    targetConfig,
+    schema,
+    project,
+    ws.relativeCwd(cwd)
+  );
+
+  if (ws.isNxExecutor(nodeModule, executor)) {
+    const r = implementation(combinedOptions, {
+      root: root,
+      target: targetConfig,
+      workspace: workspace,
+      projectName: project,
+      cwd: cwd,
+      isVerbose: isVerbose,
+    });
+    return (isPromise(r) ? promiseToIterator(r) : r) as any;
+  } else {
+    const observable = await (await import('./ngcli-adapter')).scheduleTarget(
+      root,
+      {
+        project,
+        target,
+        configuration,
+        runOptions: combinedOptions,
+      },
+      isVerbose
+    );
+    return eachValueFrom<T>(observable as any);
+  }
+}
+
+export async function runExecutor<T extends { success: boolean }>(
+  targetDescription: {
+    project: string;
+    target: string;
+    configuration?: string;
+  },
+  options: { [k: string]: any },
+  context: ExecutorContext
+): Promise<AsyncIterableIterator<T>> {
+  return await runExecutorInternal<T>(
+    targetDescription,
+    options,
+    context.root,
+    context.cwd,
+    context.workspace,
+    context.isVerbose,
+    false
+  );
 }
 
 export async function run(
@@ -164,49 +256,16 @@ export async function run(
     const workspace = ws.readWorkspaceConfiguration();
     const defaultProjectName = ws.calculateDefaultProjectName(cwd, workspace);
     const opts = parseRunOpts(cwd, args, defaultProjectName);
-    validateTargetAndConfiguration(workspace, opts);
-
-    const target = workspace.projects[opts.project].targets[opts.target];
-    const [nodeModule, executor] = target.executor.split(':');
-    const { schema, implementation } = ws.readExecutor(nodeModule, executor);
-    const combinedOptions = combineOptionsForExecutor(
-      opts.runOptions,
-      opts.configuration,
-      target,
-      schema,
-      defaultProjectName,
-      ws.relativeCwd(cwd)
-    );
-    if (opts.help) {
-      printRunHelp(opts, schema);
-      return 0;
-    }
-
-    if (ws.isNxExecutor(nodeModule, executor)) {
-      const r = implementation(combinedOptions, {
+    return iteratorToProcessStatusCode(
+      await runExecutorInternal(
+        opts,
+        opts.runOptions,
         root,
-        target,
+        cwd,
         workspace,
-        projectName: opts.project,
-      });
-      if (isPromise(r)) {
-        return (await r).success ? 0 : 1;
-      } else {
-        return iteratorToProcessStatusCode(r);
-      }
-    } else {
-      return iteratorToProcessStatusCode(
-        eachValueFrom(
-          await (await import('./ngcli-adapter')).scheduleTarget(
-            root,
-            {
-              ...opts,
-              runOptions: combinedOptions,
-            },
-            isVerbose
-          )
-        )
-      );
-    }
+        isVerbose,
+        opts.help
+      )
+    );
   });
 }
