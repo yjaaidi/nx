@@ -800,6 +800,30 @@ describe('app', () => {
           appTree.read('my-app/vite.config.mts', 'utf-8')
         ).toMatchSnapshot();
       });
+
+      it.failing(
+        'should not override build configuration when using vitest as a test runner',
+        async () => {
+          await generateApp(appTree, 'my-app', {
+            unitTestRunner: UnitTestRunner.Vitest,
+          });
+
+          const { targets } = readProjectConfiguration(appTree, 'my-app');
+          expect(targets.build.executor).toBe('@nx/angular:build');
+        }
+      );
+
+      it.failing(
+        'should not override build configuration when using vitest as a test runner',
+        async () => {
+          await generateApp(appTree, 'my-app', {
+            unitTestRunner: UnitTestRunner.Vitest,
+          });
+
+          const { targets } = readProjectConfiguration(appTree, 'my-app');
+          expect(targets.build.executor).toBe('@nx/angular:serve');
+        }
+      );
     });
 
     describe('none', () => {
